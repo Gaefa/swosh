@@ -44,6 +44,9 @@ public class PlayerHealth : MonoBehaviour
     private MobileShoot mobileShoot;
     private MobileCameraSwipe camSwipe;
 
+    [Header("Crosshair")]
+    public CrosshairUI crosshairUI;
+
     private void Awake()
     {
         rb = GetComponent<Rigidbody>();
@@ -111,6 +114,9 @@ public class PlayerHealth : MonoBehaviour
 
         SetControlsEnabled(false);
 
+        if (crosshairUI != null)
+            crosshairUI.SetVisible(false);
+
         if (rb != null)
         {
             rb.linearVelocity = Vector3.zero;
@@ -154,6 +160,9 @@ public class PlayerHealth : MonoBehaviour
 
         SetControlsEnabled(true);
         ResetTouchStates();
+
+        if (crosshairUI != null)
+            crosshairUI.SetVisible(true);
     }
 
     private void SetControlsEnabled(bool enabled)

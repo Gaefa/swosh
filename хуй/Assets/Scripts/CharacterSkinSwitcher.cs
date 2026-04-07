@@ -15,20 +15,16 @@ public class CharacterSkinSwitcher : MonoBehaviour
             bodyRenderer = GetComponentInChildren<SkinnedMeshRenderer>(true);
     }
 
+#if UNITY_EDITOR
     private void Update()
     {
-        // P = Paladin
         if (Input.GetKeyDown(KeyCode.P))
-        {
             SetPaladinSkin();
-        }
 
-        // U = Undead
         if (Input.GetKeyDown(KeyCode.U))
-        {
             SetUndeadSkin();
-        }
     }
+#endif
 
     public void SetUndeadSkin()
     {

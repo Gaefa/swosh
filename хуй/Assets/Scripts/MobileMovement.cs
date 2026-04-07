@@ -32,6 +32,9 @@ public class MobileMovement : MonoBehaviour
 
     public bool IsMoving { get; private set; }
 
+    [Header("Crosshair")]
+    public CrosshairUI crosshairUI;
+
     [Header("EDITOR DEBUG (Keyboard)")]
     [Tooltip("Только в Unity Editor: движение WASD. В билде не работает.")]
     public bool editorKeyboardMove = true;
@@ -479,6 +482,9 @@ public class MobileMovement : MonoBehaviour
         Vector3 xz = new Vector3(rb.linearVelocity.x, 0f, rb.linearVelocity.z);
         bool movingNow = xz.magnitude > moveAnimSpeedThreshold;
         SetIsMoving(movingNow);
+
+        if (crosshairUI != null)
+            crosshairUI.SetMoveSpeed(Mathf.Clamp01(xz.magnitude / moveSpeed));
     }
 
     private void SetIsMoving(bool value)

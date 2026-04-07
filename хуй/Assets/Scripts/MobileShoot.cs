@@ -63,6 +63,9 @@ public class MobileShoot : MonoBehaviour
     [Tooltip("Блокирует ввод (например, когда игрок мёртв или открыт магазин/меню).")]
     public bool inputLocked = false;
 
+    [Header("Crosshair")]
+    public CrosshairUI crosshairUI;
+
     [Header("Recoil")]
     public WeaponRecoil recoil;
 
@@ -504,6 +507,9 @@ public class MobileShoot : MonoBehaviour
 
             recoil.Kick(strength);
         }
+
+        if (crosshairUI != null)
+            crosshairUI.OnShot();
     }
 
     private void UpdateAmmoUI()
@@ -539,6 +545,9 @@ public class MobileShoot : MonoBehaviour
 
         UpdateAmmoUI();
 
+        if (crosshairUI != null)
+            crosshairUI.OnWeaponChanged(type);
+
         Log($"[Weapon] equipped {type}");
     }
 
@@ -567,6 +576,9 @@ public class MobileShoot : MonoBehaviour
         ForceTPPToWeaponIdle(null);
 
         UpdateAmmoUI();
+
+        if (crosshairUI != null)
+            crosshairUI.OnWeaponChanged(null);
     }
 
     private int GetWeaponId(WeaponType type)

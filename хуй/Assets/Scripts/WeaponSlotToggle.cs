@@ -2,15 +2,16 @@ using UnityEngine;
 
 public class WeaponSlotToggle : MonoBehaviour
 {
-    [SerializeField] private GameObject heavyWeapon; // ссылка на heavy_gun_blockot_v1
+    [SerializeField] private GameObject heavyWeapon;
 
+#if UNITY_EDITOR
     private void Update()
     {
-        // ТЕСТ: кнопка "1" включает/выключает heavy
         if (Input.GetKeyDown(KeyCode.Alpha1))
         {
             if (heavyWeapon != null)
                 heavyWeapon.SetActive(!heavyWeapon.activeSelf);
         }
     }
+#endif
 }
