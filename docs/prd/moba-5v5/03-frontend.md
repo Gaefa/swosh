@@ -1,472 +1,396 @@
-# PRD «Линии» (Lanes) 5v5 — 03. Фронтенд (Unity-клиент)
+# PRD «Линии» (Lanes) 5v5 — 03. Фронтенд (Unity-клиент CS Magic)
 
-> Статус: черновик. Автор раздела — ведущий Unity-разработчик клиента.
-> Связанные разделы: `01-product.md` (цели, вехи M1–M6, целевые устройства), `02-game-design.md` (все числа баланса), `04-backend.md` (матч-сервер, протокол, матчмейкинг).
-> Пометки: **[фаза 0]** — офлайн-MVP с ботами, **[фаза 1]** — онлайн 5v5 с авторитетным сервером, **[обе]** — нужно в обеих фазах.
-> Пути ниже — от корня репо, Unity-проект в `хуй/Assets/`.
+> Статус: черновик v2, переписан после ответов владельца. Автор раздела — ведущий Unity-разработчик клиента.
+> Клиент — `CS_Magic_MVP`, сервер — `CSMagic.Server`. «Линии» — следующий режим после Classic2v2 / Classic5v5 / GunGame / Throne Wars.
+> Связанные разделы: `01-product.md` (цели, устройства), `02-game-design.md` (все числа), `04-backend.md` (серверная сторона того же протокола).
+> Валюта матча — **Деньги**, как в 5v5 (`$` в HUD). «Золото» в CS Magic — донатная валюта меты.
 
 ## 0. Кратко
 
-- Новый режим живёт в **отдельной сцене** `Lanes5v5.unity` с собственным менеджером `LanesMatchManager`. `Round2v2Manager` и режим 2v2 не ломаем.
-- Всё, что сейчас захардкожено на 4 актора (`ActorId`, `MatchStats`, `ScoreboardUI`, `EnemySpawner`), и три раздельных компонента здоровья — **рефакторим до запуска режима**. Без этого 5v5 + крипы + Башни не собрать.
-- **NavMesh в проекте сейчас нет** (пакет `com.unity.ai.navigation` 2.0.9 установлен, но ни одного `NavMeshSurface`/`NavMeshAgent`, в сценах `m_NavMeshData: {fileID: 0}`). Для Линий, Леса и ботов его нужно запечь.
-- Крипы и Башни делаем дешёвыми: без Rigidbody, без физических пуль, AI тикает 5–10 раз в секунду, всё на пулах, урон считает логика, а не триггеры.
-- Баланс целиком в ScriptableObject (`LanesConfig`, `CreepDefinition`, `MatchItemDefinition`, …) со **стабильными ID**: в фазе 1 тот же конфиг выгружается в JSON для сервера. UI строим на префабах с `[SerializeField]`, раскладку настраиваем в инспекторе.
-- Симуляцию (экономика, Магазин, урон, FSM крипов) с самого начала отделяем от представления. В фазе 0 её источник — локальный код, в фазе 1 — сервер, а HUD и вью остаются прежними.
+- **Клиент — вид сервера.** Крипов, Башни, Ядро, Деньги, Предметы, Возврат и респаун симулирует и решает сервер. Клиент интерполирует, рисует и отправляет просьбы. На клиенте нет AI крипов, NavMesh и локального урона.
+- **Свой стек не меняем.** Остаются UDP через `GameNetworkClient`, текстовые сообщения, опрос `get_*`, снапшоты и матчмейкинг `queue:`. Переход на Fish-Net/NGO/Photon означал бы переписать сеть всех четырёх режимов ради одного.
+- **Строим поверх двух готовых режимов.**
+  - Throne Wars: три Линии, 18 Башен + 2 трона, состояние зданий от сервера, сборщик карты, экспорт серверных данных.
+  - Classic5v5: Магазин `get_shop`/`buy`, Деньги, броня, набор оружия, HUD и меню покупки на префабах, установщик `Tools → Modes`.
+- **Новое в протоколе:**
+  - `units_state` — крипы, 10 Гц, разбит на части не больше 1200 байт;
+  - `lanes_state` — строения, фронт Волн, Лес, 4 Гц;
+  - `lanes_events` — Деньги, снос, Волны, пинги, по номеру события;
+  - `lanes_board` — таблица на 10, 1 Гц;
+  - `lanes_config` — справочник баланса, один раз за матч;
+  - расширения `shop`/`buy`, новые `sell`, `use_item`, `recall`, `ping`.
+  Всё в стиле CS Magic: новые поля только в конец.
+- **Баланс клиент не хранит.** HP, урон, цены, радиусы и тайминги приходят от сервера. На клиенте только представление: префабы, иконки, тексты Предметов (ScriptableObject по `itemId`). UI на префабах с `[SerializeField]`, ставится идемпотентным `[MenuItem]`.
+- **Главный риск — производительность** на слабом Android: 10 героев + до ~70 крипов + 14 строений. Решаем пулами, одним общим апдейтом юнитов, парсингом без аллокаций, отсечением аниматоров и LOD. Плюс трафик: `players_state` на 10 игроков нужно замерить уже сейчас.
 
-### 0.1. Что есть в коде сейчас (факты, на которые опирается раздел)
+### 0.1. На чём стоим (проверено по git, 20.10)
 
-| Факт | Где |
-|---|---|
-| `Team` содержит только `{Player, Enemy}`. `MobileShoot.DoShoot` жёстко ставит пуле `ownerTeam = Team.Player` | `Scripts/Team.cs`, `Scripts/MobileShoot.cs` |
-| `ActorId` — enum на 4 актора; `MatchStats` раскладывает его через `switch`; `ScoreboardUI` содержит 4 жёстко заданные строки; `EnemySpawner` выдаёт Enemy1/Enemy2 по индексу | `ActorId.cs`, `MatchStats.cs`, `ScoreboardUI.cs`, `EnemySpawner.cs` |
-| Здоровье реализовано трижды (`PlayerHealth`, `EnemyHealth`, `AllyHealth`), HP целые (по 3), и каждый компонент проверяет `Round2v2Manager.CurrentState` | `*Health.cs` |
-| `MagicBullet` — пуля на Rigidbody (Continuous), `Instantiate/Destroy` без пула, `FindObjectOfType<Round2v2Manager>()` в `Awake` **каждой** пули, урон через три `GetComponentInParent` | `MagicBullet.cs` |
-| Статы оружия (урон, кулдаун, магазин) захардкожены в `MobileShoot.ApplyWeaponStats` | `MobileShoot.cs` |
-| `EnemyChase` — локальная навигация без NavMesh (лучи-обходы, wall-follow, анти-застревание, стрейф, LOS). Цель ищет через `FindGameObjectWithTag("Player")` + `FindObjectsOfType<AllyHealth>()` | `EnemyChase.cs` |
-| `AllyChase` движется к цели по прямой, без обхода препятствий и проверки LOS. Пока цели нет, вызывает `FindObjectsOfType<EnemyHealth>()` каждый кадр | `AllyChase.cs` |
-| `NavHints` — синглтон с ручными точками-подсказками у стен | `NavHints.cs` |
-| `EnemyHealth.HitFlash` использует `rend.material`: на каждого врага создаётся копия материала | `EnemyHealth.cs` |
-| `ShopButtons` — 3 метода `PickFast/Heavy/Roklet` → `MobileShoot.SetWeapon` | `ShopButtons.cs` |
-| Меню: `MenuController.OnPlayPressed()` вызывает `SceneManager.LoadScene(1)`. Инвентарь в меню косметический (`ItemData`: имя, цвет редкости, иконка) | `MainMenu/*.cs` |
-| Строки UI захардкожены по-русски («ПОБЕДА», «ПОРАЖЕНИЕ», «НИЧЬЯ») | `Round2v2Manager.cs`, `MatchOverUI.cs` |
-| Unity 6000.3.7f1, URP 17.3, есть три URP-ассета Low/Medium/High, Test Framework 1.6.0, Fixed Timestep 0.02 | `ProjectSettings/`, `Packages/manifest.json`, `Assets/Settings/` |
+| Что | Где лежит | В `origin/test`? |
+|---|---|---|
+| Сеть матча: `GameNetworkClient` (один UDP-сокет, очередь приёма), `MatchStateReceiver` (опрос `get_match_state` раз в 1 c), `PlayersStateReceiver` (опрос `get_players_state` 30 Гц, `snapshot_v1`), `ServerWorldSnapshotBuffer` (интерполяция 100 мс, синхронизация часов, `LagCompensationClientState`), `ShootEventsReceiver`, `ProjectileHitEventsReceiver`, `ProjectileVisualMover`, `RemotePlayersManager` | `Assets/Scripts/...` | да |
+| `GameModeSelection` (без Classic5v5), `ModeBootstrapper` (знает только 2v2 и GunGame), `ScoreboardUI.FillSortedRows` (сортированные строки для GunGame/5v5), `MatchActorRegistry`/`MatchStats` (зашиты на 4 актёра) | там же | да |
+| Командный бой 5v5 на клиенте: `GameModes/Classic5v5/*` (`Classic5v5ShopClient`, `Classic5v5BuyMenuView`, `Classic5v5BuyCardView`, `Classic5v5HudView`, `Classic5v5UiSettings`, `Classic5v5TdmState`, `Classic2v2RoundManager.Tdm.cs`), `Editor/Classic5v5PrefabsSetup.cs`, `Editor/PassMapBuilder.cs`, `PlayerWeaponLoadout` (маска купленного) | `origin/feature/classic5v5-tdm` (PR #36) | **нет** |
+| Throne Wars на клиенте: `ThroneWarsManager`, `ThroneWarsBuilding`, `ThroneWarsState` (`match_state` из 22 полей, `p[11]="Siege"`, здания `S2;id,hp,unlocked,shot,x,y,z|…`), `Editor/ThroneWarsMapBuilder` + `ThroneWarsVerification`, экспорт `ServerMaps/`, `ServerSpawns/`, `ServerObjectives/Map_ThroneWarsObjective.json` | `origin/cod/throne-wars-map` | **нет** |
+| Серверная часть Throne Wars (`ThroneWarsRules`, `ThroneTowerRules`) | только незакоммиченная рабочая копия `CSMagic.Server-throne-wars` | **нет** |
 
 ## 1. Архитектура клиента режима
 
-### 1.1. Компоненты
+### 1.1. Регистрация режима (по образцу Throne Wars и Classic5v5)
+
+- `GameModeSelection`: `GameMode.Lanes`, `ProtocolName → "Lanes"`, `PlayersPerSide → 5`, `MatchScene → "Map_Lanes"`.
+- `MatchStateReceiver.HandleResponse`, `GameServerClient.NotifySpawnReceived` и `PlayersStateReceiver` (направление урона от не-игрока) получают ветку `CurrentMatchData.GameMode == "Lanes"` → `LanesManager.Instance`. Это ровно те три места, которые трогает Throne Wars.
+- `ModeBootstrapper` в сцену `Map_Lanes` не нужен: режим однозначен по сцене, как у Throne Wars.
+- Меню: карточка режима и очередь `queue:<playerId>:Lanes:<token>:0` через существующие `MatchQueueClient`/`MatchSearchUI`, затем выбор стороны `SideSelectScene`.
+
+### 1.2. Компоненты сцены `Map_Lanes`
 
 ```
-Lanes5v5.unity
-└─ _Systems
-   ├─ LanesMatchManager      — state machine матча, условие победы (Ядро), пауза [фаза 0]
-   ├─ LanesConfig (SO)       — корень баланса: ссылки на все SO ниже (числа — из 02)
-   ├─ UnitRegistry           — реестр всех юнитов по командам + пространственная сетка (замена FindObjectsOfType)
-   ├─ AITickScheduler        — раздаёт «мысли» AI с бюджетом на кадр
-   ├─ PoolService            — пулы крипов, снарядов, VFX, полос HP, всплывающих чисел
-   ├─ WaveDirector           — таймер Волн крипов → LaneSpawner ×6 (3 Линии × 2 команды)
-   ├─ StructureRegistry      — Башни ×12, Ядро ×2, Фонтан ×2, правила уязвимости
-   ├─ HeroRoster             — 10 слотов героев (игрок + 9 ботов [фаза 0] / 10 сетевых [фаза 1])
-   ├─ EconomyService         — Золото по слотам, начисления (добивание, убийство, Башня, пассивный доход)
-   ├─ ShopService            — покупка/продажа Предметов, инвентарь слота, проверка «в Фонтане»
-   ├─ StatService            — сложение статов героя: база + Предметы (HP, урон, скорость, броня)
-   ├─ RespawnService         — Таймер респауна (формула из 02), респаун в Фонтане
-   ├─ PingService            — сигналы команде (отдаются ботам [фаза 0] / серверу [фаза 1])
-   └─ MatchStats (рефактор)  — K/D/A, добивания, урон по строениям, заработанное Золото
-UI
-   ├─ HudController          — постоянный HUD (мини-карта, таймер, Золото, HP, слоты Предметов)
-   ├─ WorldBarsManager       — полосы HP над крипами/Башнями/героями (пул, отдельный Canvas)
-   ├─ ShopScreen             — экран Магазина
-   ├─ ScoreboardUI (5v5)     — расширение текущего
-   ├─ DeathOverlay           — Таймер респауна, кто убил
-   └─ MatchEndScreen         — итоги матча
+LanesManager                — фаза матча из match_state, свой герой (спавн, респаун, Возврат, ввод), конец матча
+├─ LanesConfig (runtime)     — справочник из lanes_config (HP, радиусы, тайминги, слоты); на клиенте не хранится
+├─ LanesStateReceiver        — опрос get_lanes_state 4 Гц → строения, фронт Волн, лагеря Леса
+├─ LanesUnitsReceiver        — опрос get_units_state 10 Гц → LanesUnitsBuffer (интерполяция) → CreepViewPool
+├─ LanesEventsReceiver       — опрос get_lanes_events по номеру → Деньги +N, снос, Волны, пинги, лента убийств
+├─ LanesBoardReceiver        — get_lanes_board 1 Гц → таблица на 10
+├─ LanesShopClient           — расширение Classic5v5ShopClient: get_shop / buy / sell / use_item
+├─ LanesBuildingView ×14     — обобщённый ThroneWarsBuilding (Башни T1/T2 ×12, Ядро ×2)
+├─ CreepView (пул)           — вид крипа: модель, аниматор, хитбокс для прицела, полоса HP
+└─ UI (из LanesUiSettings)   — HUD, мини-карта, полосы HP, Магазин, таблица, итоги
+Существующие без изменений: игрок (MobileShoot/MobileMovement/PlayerHealth), RemotePlayersManager,
+ShootEventSender/Receiver, ProjectileHitEventsReceiver, PauseMenu, DamageDirectionUI, HitMarkerUI
 ```
 
-**Правило, которое понадобится в фазе 1.** Любое изменение состояния (урон, смерть, Золото, покупка, респаун) проходит **через одну точку**: соответствующий сервис или `Health.ApplyDamage`. Наружу оно уходит C#-событием (`OnDamaged`, `OnDied`, `OnGoldChanged`, `OnInventoryChanged`). HUD и вью подписаны только на события и никогда не лезут в чужие поля. В фазе 1 эти же события генерирует обработчик сетевых сообщений, а локальная симуляция отключается. Сервисы экономики, Магазина и статов пишем обычными C#-классами без `MonoBehaviour`, где это ничего не стоит: их можно покрыть EditMode-тестами и при необходимости перенести на .NET-сервер.
+### 1.3. Состояния
 
-### 1.2. State machine матча (`LanesMatchManager`)
+Фазы задаёт сервер полем `phase` в `match_state`: `Waiting → Warmup → Round → MatchOver`. Клиент только отображает их, переходы идемпотентны: повтор того же `match_state` ничего не меняет. Защита от устаревших пакетов — как в Throne Wars: `respawnVersion` не уменьшается, а HP строения в рамках матча только падает.
 
-Это не замена `Round2v2Manager`, а параллельный менеджер. Раундов в режиме нет: матч идёт одним непрерывным отрезком.
+Состояние своего героя тоже приходит из `match_state`: `alive`, `respawnIn`, `inFountain`, `recallLeft`, `teleportVersion`. Ввод блокируется и разблокируется парно, через `ApplyControls` по образцу `ThroneWarsManager` (смерть, пауза, MatchOver, канал Возврата).
 
-```
-Loading ──► Pregame ──► Playing ──► MatchOver ──► Results
-(прогрев    (отсчёт,    (Волны,       (Ядро        (экран итогов,
- пулов,      Магазин     Башни,        уничтожено;  «В меню» /
- NavMesh,    открыт в    респауны)     ввод         «Ещё раз»)
- спавн 10)   Фонтане)      │  ▲         заблокирован)
-                           ▼  │
-                         Paused [фаза 0: сворачивание приложения / кнопка паузы]
-```
+## 2. Что переиспользуем и что поправить по пути
 
-Параллельно у каждого героя своя машина состояний: `Alive → Dead (Таймер респауна) → Respawning → Alive`, плюс флаг `InFountain` (определяет доступность Магазина) и `Recalling` (идёт возврат на базу).
+| Берём | Как используем в «Линиях» | Что не копируем / чиним | Размер |
+|---|---|---|---|
+| `ThroneWarsBuilding` | Основа `LanesBuildingView`: HP, щит/открыт, луч выстрела по счётчику `shot`, обломки высотой 0.4 м с одновременным уменьшением коллайдера на клиенте и сервере | `maxHp=300`, подписи «ВЕРХ · 1» и цвета в коде; `new Material` на каждое здание. В Lanes `maxHp` берём из `lanes_config`, тексты и цвета — из `[SerializeField]`, материал луча общий | M |
+| `ThroneWarsManager` | Каркас `LanesManager`: спавн/респаун по `spawnId`, `ApplyControls`, конец матча | LINQ (`Any`/`First`) на каждый пакет — в Lanes поиск по словарю | M |
+| `ThroneWarsMapBuilder` + `ThroneWarsVerification` | Шаблон `LanesMapBuilder` и `LanesVerification` (§5) | Параметры Башен в компоненте сцены (`ThroneWarsObjective.towerDamage`…) — в Lanes числа только на сервере | L |
+| `Classic5v5ShopClient`, `Classic5v5ShopItem` | Протокол `get_shop`/`buy` с `buySeq`, причины отказа по-русски. Добавляем поля в конец (§3.5) | — | M |
+| `Classic5v5BuyMenuView`/`BuyCardView`/`HudView`/`UiSettings`, `Classic5v5PrefabsSetup` | Образец для `LanesShopView`, `LanesItemCardView`, `LanesHudView`, `LanesUiSettings` и установщика `Tools → Modes → Install Lanes` | Ряды «оружие/снаряжение» → вкладки категорий | L |
+| `PlayerWeaponLoadout` + `WeaponSwitchSender` | Оружие покупается как в 5v5: маска купленного, выдача по `weaponGrantVersion` | — | S |
+| `ScoreboardUI.FillSortedRows` + `ScoreRowUI` | Таблица на 10 | `ScoreRowUI` знает только имя/K/D. Делаем `LanesScoreRowView`-префаб | M |
+| `ProjectileVisualMover`, `WeaponVFXController` | Снаряды героев (быстрее, скорость из 02 через сервер) и визуальные снаряды дальних крипов и Башен | `Instantiate/Destroy` на каждый снаряд — для Lanes пул | M |
+| `MatchOverUI`, `PauseMenu`, `DamageDirectionUI`, `HitMarkerUI`, `NoticeUI` | Как есть | `MatchOverUI.Show` переворачивает счёт для Нежити (известная грабля) — в Lanes подпись передаём явно | S |
+| `MatchStats`, `MatchActorRegistry`, ручные строки `ScoreboardUI` | Не используем: на 4 актёра. Таблица Lanes берёт данные из `lanes_board` | — | — |
 
-**Развязка с 2v2.** Сейчас `PlayerHealth`, `EnemyHealth`, `AllyHealth` и `MagicBullet` напрямую проверяют `Round2v2Manager.CurrentState == Round`. Вводим маленький статический `MatchPhase.CombatAllowed`: его выставляют оба менеджера, а компоненты читают только его. Размер S, поведение 2v2 не меняется.
+## 3. Протокол: что «Линиям» нужно добавить
 
-## 2. Переиспользуем / рефакторим / пишем с нуля
+Канон CS Magic: текст, разделитель `:`, записи списков через `|`, поля записи через `,`, float — в `InvariantCulture`, клиент опрашивает `get_*:<matchId>:<playerId>`. Новые поля дописываются **только в конец**, а клиент читает их по индексу с проверкой длины. Всё уходит через `GameNetworkClient.Instance.Send`, ID игрока — `PlayerPrefs "CSMAGIC_PLAYER_ID"`. Ниже — ожидание клиента. Финальные имена и частоты фиксирует `04-backend.md`.
 
-Размеры: **S** — до 1 дня, **M** — 2–4 дня, **L** — 1–2 недели (на одного клиентского разработчика).
+### 3.1. `match_state` (опрос как сейчас)
 
-### 2.1. Переиспользуем как есть
-
-| Файл | Зачем в режиме |
-|---|---|
-| `MobileMovement.cs`, `MobileCameraSwipe.cs`, `FpsCameraController.cs`, `FloatingJoystickVisual.cs` | Управление героем-игроком. Скорость из `StatService` пробрасываем через существующие поля |
-| `WeaponRecoil.cs`, `WeaponSway.cs`, `ADSController.cs`, `CrosshairUI.cs`, `CrosshairProfile.cs`, `MuzzleFlashLight.cs` | Ощущение стрельбы |
-| `TPPArmedToggle.cs`, `IKWalkWeight.cs`, `CharacterBodySelector.cs`, `CharacterSkinSwitcher.cs` | Тела героев и скины (Undead/Paladin) — для 10 героев |
-| `HoldToShowScoreboard.cs` | Скорборд по удержанию остаётся без изменений |
-| `Round2v2Manager.cs`, `ShopButtons.cs`, `AllyChase.cs`, `EnemySpawner.cs`, `AllySpawner.cs`, `NavHints.cs` | Остаются за режимом 2v2. В «Линиях» не используются |
-
-### 2.2. Рефакторим
-
-| Файл | Что делаем | Размер |
-|---|---|---|
-| `Team.cs` | `{Blue = 0, Red = 1, Neutral = 2}`. **Целые значения 0/1 сохраняем**: в префабах и сцене enum сериализован числом, поэтому 2v2 продолжит работать (`Player→Blue`, `Enemy→Red`). `Neutral` нужен для крипов Леса, если они будут (02) | S |
-| `ActorId.cs`, `ActorIdentity.cs` | Enum заменяем на номер слота героя (`int slot` 0..9) плюс `Team`, `displayName`, `isBot`. Слоты выдаёт `HeroRoster`. У крипов и Башен свой `UnitId`, в K/D/A они не попадают. Для 2v2 оставляем адаптер со старыми значениями | M |
-| `PlayerHealth.cs`, `EnemyHealth.cs`, `AllyHealth.cs` | Общий компонент `Health`: max/current HP, броня из `StatService`, `Team`, `ApplyDamage(DamageInfo)`, события `OnDamaged/OnDied`, `lastHitBy` и список помощников за окно N секунд (для ассистов и Золота, окно из 02). Презентацию выносим отдельно: `PlayerDeathPresenter` (анимация смерти, блокировка ввода, капсула — то, что сейчас делает `PlayerHealth.Die`) и `HitFeedback` (вспышка и звук из `EnemyHealth`). HP — `int` в масштабе из 02: при +HP от Предметов текущие «3 HP» не годятся | L |
-| `MagicBullet.cs` | Пул вместо `Instantiate/Destroy`. Убираем `FindObjectOfType` из `Awake`. Урон один раз через `IDamageable → Health`. Попадание пули героя в крипа/Башню — по коллайдеру хитбокса. Для крипов и Башен класс **не используем** (см. §4) | M |
-| `MobileShoot.cs` | Статы оружия из `WeaponDefinition` (SO) вместо `ApplyWeaponStats`. Множители урона и скорострельности из `StatService`. `ownerTeam` берём из `ActorIdentity`, а не `Team.Player`. Импакты и пули — через пул | M |
-| `EnemyChase.cs` | Выносим локальную навигацию (обход, анти-застревание, отталкивание, стрейф, LOS) в переиспользуемый `BotSteering`. Поиск цели — через `UnitRegistry`. Поверх ставим `HeroBotBrain` (§5) | L |
-| `MatchStats.cs` | Массив по слотам вместо полей `playerKills/allyKills/...`. Добавляем ассисты, добивания крипов, урон по строениям, Золото. Событие `OnStatsChanged` для UI. Защиту от двойной регистрации сохраняем | M |
-| `ScoreboardUI.cs` | Префаб строки `ScoreboardRowUI`, 2 колонки по 5 строк генерируются по `HeroRoster` (§6.5) | M |
-| `MatchOverUI.cs` | Превращаем в `MatchEndScreen` с таблицей итогов. Строки — из таблицы локализации | S |
-| `MenuController.cs` | Выбор режима, лобби. `LoadScene(1)` заменяем на сцену из `GameModeDefinition` (SO) | M |
-| `GameManager.cs` | Legacy, в режиме не используется. Не трогаем | — |
-
-### 2.3. Пишем с нуля
-
-| Компонент | Размер |
-|---|---|
-| `LanesMatchManager` + `MatchPhase` + пауза [фаза 0] | M |
-| SO-конфиги: `LanesConfig`, `WaveDefinition`, `CreepDefinition`, `TowerDefinition`, `MatchItemDefinition`, `ShopCatalog`, `BotProfile`, `BotBuildDefinition`, `WeaponDefinition`, `GameModeDefinition` | M |
-| `UnitRegistry` + пространственная сетка, `AITickScheduler`, `PoolService` (на `UnityEngine.Pool.ObjectPool<T>`) | M |
-| `LanePath` (вейпоинты), `WaveDirector`, `LaneSpawner` | M |
-| Крип: `CreepUnit`, `CreepBrain` (FSM), атаки ближнего/дальнего, `ProjectileVisualSystem` | L |
-| `Tower`, `Core`, `Fountain` (зона покупки, лечения, точки респауна) | M |
-| Лес: `NeutralCamp` (если в 02 есть лагеря) | M |
-| `EconomyService`, `ShopService`, `StatService`, `RespawnService` | L |
-| `HeroRoster`, `HeroBotBrain` + `BotSteering` | L |
-| HUD, мини-карта, `WorldBarsManager`, `ShopScreen`, `DeathOverlay`, `MatchEndScreen`, скорборд 5v5 | L |
-| Возврат на базу (Recall), пинги, расходники | M |
-| Карта: блокаут 3 Линий + Лес, NavMesh, LOD, освещение (с левел-артом) | L |
-| [фаза 1] Сетевой слой клиента (§8) | L×3–4 |
-
-## 3. Сцена и карта
-
-### 3.1. Структура сцены
+Общая часть `p[0..10]` не меняется: matchId, phase, remaining, scoreA, scoreB, winner, weapon, spawnId, respawnVersion, weaponId, weaponGrantVersion. Хвост Lanes:
 
 ```
-Lanes5v5.unity
-├─ _Systems            (см. §1.1)
-├─ Map                 статичная геометрия, NavMeshSurface, LOD Group, запечённый свет
-├─ Lanes
-│  ├─ Lane_Top         LanePath: вейпоинты от базы Синих к базе Красных
-│  ├─ Lane_Mid
-│  └─ Lane_Bot
-├─ Jungle              NeutralCamp_* (если есть в 02)
-├─ Base_Blue / Base_Red
-│  ├─ Fountain         5 точек респауна, триггер зоны Магазина/лечения
-│  ├─ Core
-│  ├─ LaneSpawner_Top/Mid/Bot
-│  └─ Towers           Tower_Top_T1/T2, Tower_Mid_T1/T2, Tower_Bot_T1/T2
-├─ Runtime             (родитель для героев и крипов из пулов)
-└─ UI                  HUD Canvas, WorldBars Canvas, Shop Canvas, Overlay Canvas, EventSystem
+p[11] = "Lanes"           — метка режима (сейчас 5v5 и Siege оба шлют 22 поля и различаются только содержимым p[11])
+p[12] = "L1"              — версия схемы
+p[13] money  p[14] ownedWeaponsMask  p[15] armor
+p[16] respawnIn (c)  p[17] inFountain 0/1  p[18] recallLeft (дц, 0 = нет канала)
+p[19] teleportVersion     — растёт при завершении Возврата → клиент переносит героя на spawnId, как при респауне
+p[20] items  "i07;i12;-;-"           — 4 слота Предметов
+p[21] consumables "c19x2;-"          — 2 слота расходников с количеством
+p[22] maxHp  p[23] overtime 0/1
 ```
 
-Существующие `Prefabs/Maps/Map_Poolday_*` и `MapRoot` — арены 2v2, они не подходят. Для «Линий» нужна новая карта: сначала блокаут из `Prefabs/Parts_Of_Maps`, затем арт. Размеры и раскладка — в 02. Клиенту важно, чтобы у Линий были длинные прямые простреливаемые участки (влияет на LOD и дальность отрисовки), а Лес закрывал обзор (бесплатный culling).
+Для Lanes опрос `get_match_state` ускоряем с 1 c до 0.25 c (`requestInterval` — `[SerializeField]`, другие режимы не задеты). Иначе Деньги, Возврат и слоты на HUD отстают на секунду.
 
-### 3.2. NavMesh
-
-- Сейчас его нет (см. §0.1). Ставим `NavMeshSurface` на корень `Map` и запекаем в редакторе. Agent Types: `Hero` и `Creep`, радиусы подбираем по моделям.
-- Area-типы: `Lane`, `Jungle`, `Base` — ботам нужна стоимость путей (боты-герои предпочитают Линию, крипы с неё не уходят дальше поводка).
-- Башни, Ядро и Фонтан — статичная геометрия, запекается вместе с картой. Разрушенная Башня оставляет «руины» с тем же следом, поэтому NavMesh перепекать не нужно.
-- **Движение крипов:** `NavMeshAgent` с `ObstacleAvoidanceType.LowQualityObstacleAvoidance` и `avoidancePriority` по типу (ближние «толкают» дальних). Если профилирование на слабом устройстве покажет дорогую толпу — запасной вариант: движение по вейпоинтам `LanePath` с простым разведением соседей по сетке `UnitRegistry`, а NavMesh только для отхода от Линии к цели.
-- **Боты-герои** остаются на Rigidbody, как игрок (те же хитбоксы и физика). Путь берём через `NavMesh.CalculatePath` с пересчётом раз в 0.5–1 с, а к следующему углу пути ведёт существующее рулевое управление из `EnemyChase` (`BotSteering`). Так мы не смешиваем `NavMeshAgent` с Rigidbody.
-
-### 3.3. Пути Линий
-
-- `LanePath` — компонент с упорядоченными дочерними Transform-вейпоинтами и гизмо в редакторе. Синие идут по списку вперёд, Красные — назад.
-- Крип переходит к следующему вейпоинту по радиусу достижения. После погони возвращается к **ближайшему вейпоинту впереди** по своему направлению, а не к тому, с которого ушёл: иначе он побежит назад.
-
-### 3.4. Спавн Волн
-
-- `WaveDirector` держит один общий таймер (интервал из `LanesConfig`, по брифу 30 с; финал — в 02). По таймеру он запускает все 6 `LaneSpawner`.
-- Состав Волны (ближние/дальние, рост со временем матча) берём из `WaveDefinition`, числа — в 02.
-- **Спавн размазываем по кадрам**: 1–2 крипа за кадр, чтобы не было пика на 30+ активаций одновременно.
-
-### 3.5. Пулы
-
-- Пулы: крипы (по типам), видимые снаряды (пули героев, снаряды дальних крипов и Башен), VFX попаданий/смерти, полосы HP, всплывающие «+N Золота», AudioSource для 3D-звуков.
-- Прогрев — на экране загрузки (состояние `Loading`). Размер пула = пиковое число одновременно живых + запас. Пик клиент считает из чисел 02 (см. §11, вопрос 9).
-- **В цикле матча нет `Instantiate/Destroy`.** Сейчас они есть в `EnemyHealth.Die`, `MagicBullet.DestroySelf`, `MobileShoot.DoShoot` (импакты) и `MagicBullet.SpawnVFX`. Для 2v2 эти вызовы остаются, в «Линиях» их заменяет пул.
-
-## 4. Крипы и Башни на клиенте
-
-### 4.1. Компоненты префаба крипа
-
-`CreepUnit` (Team, тип, ссылка на `CreepDefinition`), `Health`, `CreepBrain`, `NavMeshAgent`, `Animator` (или запечённая анимация, §4.4), один `CapsuleCollider` на слое `Units` (кинематический, без `Rigidbody`, только как хитбокс для пуль героев), `HitFeedback`.
-
-### 4.2. FSM крипа (`CreepBrain`)
+### 3.2. `units_state` — крипы и нейтралы (10 Гц)
 
 ```
-Spawned → WalkLane ──(цель в радиусе агро)──► Engage ──(в дальности атаки)──► Attack
-             ▲                                  │                              │
-             └──── ReturnToLane ◄──(цель мертва / вышла за поводок)────────────┘
-Любое состояние ──(HP = 0)──► Dead → (анимация/VFX) → возврат в пул
+→ get_units_state:<matchId>:<playerId>
+← units_state:<snapshotId>:<serverTicks>:<part>/<parts>:U1;<rec>|<rec>|…
+  rec = id,type,side,x,z,yaw,hp,state,targetId,atk
+  id        — целое, уникально в матче (не переиспользуется)
+  type      — код из lanes_config (M ближний, R дальний, M+ усиленный, J1…Jn лагеря Леса)
+  side      — P / U / N (Паладины / Нежить / нейтралы)
+  x,z       — дециметры, целые (y клиент берёт с поверхности: карта плоская по Линиям)
+  yaw       — градусы, целые
+  state     — W идёт / A атакует / D умер (последний пакет перед исчезновением)
+  targetId  — цель атаки (u<id> юнит, h<playerId> герой, b<buildingId> строение, - нет)
+  atk       — счётчик атак: вырос → клиент играет удар/выстрел (тот же приём, что shot у Башен Throne Wars)
 ```
 
-- **Приоритет целей** реализуем как настраиваемый список в `CreepDefinition`, правила — из 02. Дефолт для прототипа (классика MOBA): (1) вражеский герой, который атакует союзного героя рядом; (2) ближайший вражеский крип; (3) ближайшее строение; (4) ближайший вражеский герой.
-- Цель пересматриваем не каждый кадр, а на тике AI и при событии «союзника рядом атакует герой».
-- **Поиск целей** — запрос радиуса в равномерной сетке `UnitRegistry` (ячейка ≈ радиус агро) с `NonAlloc`-буфером. `FindObjectsOfType` и теги не используем.
-- **LOS крипам не проверяем** (как в MOBA). Это убирает сотни лучей в секунду.
+- **Отбор по дистанции.** Сервер шлёт полные записи только для юнитов в радиусе R от героя (R — в `lanes_config`, ориентир 60 м). Дальние Волны видны лишь на мини-карте через фронт Волн в `lanes_state`.
+- **Размер пакета — до 1200 байт**, чтобы не ловить IP-фрагментацию на мобильной сети. Запись ≈ 25–30 байт, в один пакет помещается ~40 записей, остальное — следующие части `<part>/<parts>`. **Каждая запись самодостаточна**, поэтому части применяются независимо, без сборки. Потерянная часть означает лишь, что этот крип обновится в следующем снапшоте.
+- Исчезновение: юнит, которого нет в пакетах 1 c, уходит в пул без анимации (вышел из радиуса). `state=D` проигрывает смерть.
 
-### 4.3. Атаки без физики
+### 3.3. `lanes_state` — строения, Волны, Лес (4 Гц)
 
-- **Ближний крип:** урон наносится по таймеру атаки (или событию анимации), если цель в дальности. Снаряда нет.
-- **Дальний крип и Башня:** логика сразу фиксирует попадание в цель через время полёта (гарантированное, как в MOBA). Визуальный снаряд — лёгкий объект из пула, который `ProjectileVisualSystem` двигает к цели **в одном общем `Update`**. Ни Rigidbody, ни триггеров, ни `MagicBullet`.
-- Урон проходит через `Health.ApplyDamage` с броней из 02. Последний ударивший записывается для начисления Золота за добивание.
+```
+→ get_lanes_state:<matchId>:<playerId>
+← lanes_state:<snapshotId>:L1;<b>|<b>|…;<w>|<w>|…;<c>|<c>|…
+  b (14 записей) = id,hp,shield,shot,targetId          — id из Map_LanesObjective.json (Paladin_Top_1 … Undead_Core)
+                    shield: 0 открыт / 1 неуязвим (правила — 02)
+  w (6 записей)  = lane,side,frontX,frontZ,count,nextWaveIn — фронт каждой Волны для мини-карты
+  c (лагеря)     = campId,alive 0/1,respawnIn
+```
 
-### 4.4. Башни и Ядро
+Состояние всех строений приходит целиком, поэтому переподключение восстанавливает разрушения. Это то же правило, что в Throne Wars.
 
-- `Tower` = `Health` + `TowerBrain` (тот же выбор целей, плюс переключение на героя, атакующего союзного героя в её радиусе) + `TowerDefinition` (числа — 02).
-- **Радиус атаки Башни видно на земле**: кольцо-декаль включается, когда герой игрока подходит близко. В FPP иначе не понять, где начинается зона Башни.
-- Уязвимость (T2 неуязвима, пока стоит T1; Ядро — пока стоят Башни; точные правила — 02) — в `StructureRegistry`. При попадании в неуязвимое строение показываем иконку щита и не показываем урон.
-- Разрушение: свап на модель руин, событие для мини-карты и оповещения, начисление Золота через `EconomyService`.
-- Смерть `Core` → `LanesMatchManager` переходит в `MatchOver`.
+### 3.4. `lanes_events` — события по номеру
 
-### 4.5. Оптимизация (цель — 60–100 юнитов одновременно на слабом Android)
+```
+→ get_lanes_events:<matchId>:<playerId>:<lastSeq>
+← lanes_events:<seq>|<type>,<args…>|…
+  money,<+N>,<reason: lasthit|kill|assist|tower|passive|sell>,<victimId>   — всплывающее «+N $»
+  kill,<killerId>,<victimId>,<assist1;assist2>                              — лента убийств
+  wave,<lane>,<side>                     tower_down,<buildingId>,<bySide>
+  under_attack,<buildingId>              core_open,<side>
+  recall_cancel,<reason: damage|move|manual>
+  ping,<fromPlayerId>,<type>,<x>,<z>,<targetId>                               — только своей команде
+  camp,<campId>,<state>                  buff,<playerId>,<buffId>,<seconds>
+```
+
+Опрос раз в 100 мс. Сервер хранит последние ~64 события на игрока, клиент присылает `lastSeq` и получает только новые. Повтор после потери пакета безопасен, это отличие от `get_shoot_events` без номера.
+
+### 3.5. Магазин, Предметы, расходники (расширение 5v5)
+
+```
+→ get_shop:<matchId>:<playerId>
+← shop:<id>,<kind>,<price>,<damage>,<category>,<upgradeFrom>,<stats>,<recOrder>|…
+  kind: Weapon / Item / Consumable (Armor, ArmorHelmet — если 02 оставит броню 5v5)
+  category: Attack / Defense / Mobility / Consumable / Weapon
+  stats: "dmg=10;hp=150;spd=10" — числа только отсюда, клиент их подставляет в описание
+  recOrder: место в «Рекомендованном» (0 = нет). Тот же порядок сервер использует для ботов
+  Старый клиент 5v5 читает первые 4 поля — не ломается.
+
+→ buy:<matchId>:<playerId>:<itemId>:<buySeq>                  (как сейчас)
+← buy_ok:<itemId>:<money>:<ownedMask>:<armor>:<helmet>:<grantVersion>:<buySeq>:<items>:<consumables>
+← buy_failed:<reason>:<money>:<buySeq>
+  новые reason: not_in_fountain, slots_full, unique_owned, need_component
+
+→ sell:<matchId>:<playerId>:<itemId>:<seq>                    — отмену (100 % за ≤ 10 c) сервер определяет сам
+← sell_ok:<itemId>:<money>:<items>:<consumables>:<refund>:<seq>  /  sell_failed:<reason>:<money>:<seq>
+
+→ use_item:<matchId>:<playerId>:<slot>:<seq>
+← use_ok:<slot>:<left>:<cooldownLeft>:<seq>  /  use_failed:<reason: cooldown|empty|dead>:<seq>
+
+→ recall:<matchId>:<playerId>:<start|cancel>:<seq>            — ход канала идёт в match_state (recallLeft), итог — teleportVersion
+→ ping:<matchId>:<playerId>:<type>:<x>:<z>:<targetId>        — сервер ограничивает частоту и рассылает команде через lanes_events
+```
+
+Оптимистичного списания нет. Кнопка показывает «ожидание», а Деньги меняются только по ответу, как в 5v5.
+
+### 3.6. `lanes_board` и справочник
+
+```
+→ get_lanes_board:<matchId>:<playerId>        ← lanes_board:<r>|…   (1 Гц)
+  r = playerId,side,isBot,kills,deaths,assists,lastHits,items,respawnIn,maxHp
+  (Деньги соперников не шлются — решение 01/02)
+
+→ get_lanes_config:<matchId>:<playerId>      ← lanes_config:L1;<key>=<value>;…   (один раз после game_join)
+  creepMaxHp.M=45; creepMaxHp.R=30; …; buildingMaxHp.T1=…; towerRange=…; fountainRadius=12;
+  recallSeconds=6; itemSlots=4; consumableSlots=2; unitsRadius=60; hashCfg=<хэш>
+```
+
+`players_state` (30 Гц) **не расширяем**: на 10 игроков он уже большой (§8), и всё медленное ушло в `lanes_board`.
+
+### 3.7. Выстрелы по крипам и строениям
+
+Путь выстрела не меняется: `ShootEventSender` → сервер считает снаряд → `projectile_hit_events`. Добавляется только жертва вида `u<id>` / `b<id>` для хитмаркера и цифры урона. Снаряды остаются (ответ владельца), скорости — в 02, клиент берёт их из `lanes_config`/статов оружия с сервера. **Лаг-компенсация по крипам.** Крипы рисуются на своей шкале времени (§4.1), поэтому в выстрел дописываем поле `unitsViewTicks` — серверное время, на котором клиент показывал крипов в момент выстрела. Откат позиций крипов делает сервер (04).
+
+## 4. Рисуем серверных юнитов
+
+Похожего на NPC в клиенте пока нет. Ближе всего строения Throne Wars, но они статичные. Крипы — новый вид объектов.
+
+### 4.1. Интерполяция
+
+- `LanesUnitsBuffer`: кольцевой буфер последних ~8 снапшотов юнитов в массивах структур по `id` (словарь `id → index`). Время показа = оценка серверного времени (`ServerClockSyncClientState`, уже есть) минус задержка. Задержка — `[SerializeField]`, ориентир 150 мс, то есть 1.5 интервала при 10 Гц.
+- Между двумя снапшотами — линейная интерполяция позиции и поворота. Если следующего снапшота нет — экстраполяция не дальше 100 мс, потом стоим. Новый юнит появляется сразу на месте, без «въезда» из точки ноль.
+- Позиция по Y — луч вниз к земле раз в 0.5 с или высота из карты, без физики каждый кадр.
+
+### 4.2. Вид крипа (`CreepView`)
+
+- **Префаб на тип** (ближний, дальний, усиленные, нейтралы Леса): модель, `Animator` (ходьба/удар/смерть), капсула-`Hitbox` на слое `Units`. Хитбокс кинематический, без `Rigidbody`. Он нужен только для подсветки прицела и импактов на клиенте: урон решает сервер по своим хитбоксам (§5).
+- **Пулы на тип**, прогрев при загрузке сцены. В матче нет `Instantiate/Destroy`.
+- Удар или выстрел — по росту `atk`. Дальний крип и Башня выпускают визуальный снаряд из пула, который летит к текущей позиции вида цели. Попадание гарантированное, это решает сервер (02).
+- Вспышка попадания — подмена `sharedMaterial` на общий flash-материал на 0.1 с. `MaterialPropertyBlock` (как в `ThroneWarsBuilding`) ломает SRP Batcher, на 70 юнитах это заметно.
+
+### 4.3. Строения (`LanesBuildingView`)
+
+Обобщённый `ThroneWarsBuilding`:
+- `maxHp` из `lanes_config`; подписи, цвета и иконка щита из `[SerializeField]`;
+- луч или снаряд по росту `shot` к `targetId`;
+- обломки при `hp=0`;
+- **кольцо радиуса атаки на земле**, когда свой герой ближе `towerRange + запас`. Без него в FPP не понять, где начинается зона Башни.
+
+Ядро — тот же компонент с `kind=Core`. Перехода из Throne Wars «трон открыт» достаточно для показа уязвимости.
+
+### 4.4. Производительность юнитов (цель — 70 крипов + 10 героев + 14 строений на слабом Android)
 
 | Мера | Деталь |
 |---|---|
-| Тик AI | `AITickScheduler`: каждый мозг думает 5–10 раз/с со сдвигом фазы, бюджет ≈ 1.5 мс/кадр. Движение ведёт агент, «мысль» — только решения |
-| Без физики у крипов | Ни у одного крипа нет динамического Rigidbody. В матрице коллизий `Units × Units` выключено, разведение даёт avoidance агента |
-| Нет аллокаций в кадре | `NonAlloc`-запросы, без LINQ, без `FindObjectsOfType`/`GetComponent` в горячем цикле (кэш при спавне из пула) |
-| Анимация | `Animator.cullingMode = CullCompletely` вне кадра. Дальним крипам снижаем частоту апдейта аниматора. Если Animator съедает больше 2–3 мс на слабом устройстве, переводим крипов на запечённую вершинную анимацию (VAT) с GPU-инстансингом |
-| LOD | `LODGroup` на 2–3 уровня + cull по дистанции. Вдоль Линии длинные прострелы, поэтому без LOD нельзя |
-| Батчинг | Шейдеры, совместимые с SRP Batcher. Вспышку попадания делаем **подменой `sharedMaterial` на общий «flash»-материал** на 0.1 с: и `rend.material` из `EnemyHealth`, и `MaterialPropertyBlock` ломают батчинг |
-| Звук | Пул AudioSource, лимит голосов на тип, звуки крипов отрезаются по дистанции |
-| Полосы HP | Только для юнитов в кадре и ближе N м, на отдельном Canvas (§6.3) |
+| Один апдейт на всех | `CreepViewPool.Tick()` двигает все виды в одном цикле по массивам. У `CreepView` нет своего `Update` |
+| Парсинг без мусора | `units_state` разбираем по `ReadOnlySpan<char>` вручную, без `Split`. Иначе ~70 массивов строк × 10 Гц на каждого = постоянный GC. Существующие парсеры с `Split`/LINQ на 1–30 Гц для Lanes в горячий путь не берём |
+| Аниматоры | `cullingMode = CullCompletely` вне кадра. Дальше N м — пониженная частота обновления или стоп-кадр. Если аниматоры > 2–3 мс на эталонном устройстве — запечённая вершинная анимация (VAT) с GPU-инстансингом |
+| LOD | `LODGroup` на 2–3 уровня + cull по дистанции. Модели крипов ниже героя (02) — меньше треугольников |
+| Физика | Хитбоксы крипов кинематические, `Units × Units` выключено в матрице коллизий. `Physics.SyncTransforms` один раз за кадр после расстановки видов (у `PlayersStateReceiver` он уже есть — общий вызов) |
+| Полосы HP | Только для юнитов в кадре и ближе N м, после урона, гаснут через несколько секунд (§6.3) |
+| Звук | Пул AudioSource, лимит голосов на тип, отсечение по дистанции |
 
-## 5. Боты-игроки [фаза 0]
+## 5. Карта `Map_Lanes`: сборщик и серверные данные
 
-Что есть: `EnemyChase` неплохо дерётся (стрейф, LOS, магазин и перезарядка, анти-застревание), но умеет только «найти ближайшего врага и бежать к нему». `AllyChase` слабее: у него нет обхода препятствий.
+Правило CS Magic: **карта = две половины.** Геометрия в Unity и коллизии/спавны/пути на сервере должны совпадать, а источник правды один.
 
-**План.** Один класс `HeroBotBrain` для обеих команд (команда задаётся параметром). `AllyChase` в режиме не используется.
+- **Сборщик** `Assets/Editor/LanesMapBuilder.cs`, `[MenuItem("Tools/CS Magic/Maps/Build Map_Lanes")]`. Идемпотентный, как `ThroneWarsMapBuilder`/`PassMapBuilder`: строит блокаут из числовой таблицы раскладки (карта 120×120 м, Линии, Лес, позиции строений — из 02) и повторным запуском не плодит дубликаты. Арт потом заменяет блокаут, не трогая маркеры.
+- **Маркеры в сцене** (в рантайм не попадают, как `ServerCollisionMarker`):
+  - `LanePathMarker` — вейпоинты 3 Линий от базы Паладинов к базе Нежити (Нежить идёт по ним в обратном порядке);
+  - точки спавна Волн;
+  - лагеря Леса;
+  - зона Фонтана (центр, радиус);
+  - `PaladinSpawn_1..5` / `UndeadSpawn_1..5` внутри Фонтанов.
+- **Экспорт** `Tools/CS Magic/Export Map_Lanes` пишет:
 
-| Поведение | Когда | Основа |
-|---|---|---|
-| `Farm` | Есть своя Волна на назначенной Линии: держится за ней, приоритетно добивает крипов с низким HP | новое |
-| `Fight` | Вражеский герой в радиусе и есть LOS | боевой код `EnemyChase` (стрейф, LOS, перезарядка) + ошибка прицела из `BotProfile` |
-| `Push` | Союзные крипы танкуют Башню — стреляет по Башне | новое |
-| `Defend` | Своё строение атакуют, бот ближе остальных | новое |
-| `Retreat` | HP ниже порога или Волна потеряна — Recall/бег в Фонтан | новое |
-| `Shop` | В Фонтане и хватает Золота на следующий Предмет из `BotBuildDefinition` | через `ShopService`, **тот же API, что у игрока** |
-| `RespondPing` | Пинг «Нужна помощь» от игрока — ближайший свободный бот идёт | новое |
+| Файл | Содержимое |
+|---|---|
+| `Assets/ServerMaps/Map_LanesCollision.json` | боксы коллизий (существующий формат `ServerCollisionExporter`) |
+| `Assets/ServerSpawns/Map_LanesSpawns.json` | 10 точек респауна в Фонтанах (формат как сейчас) |
+| `Assets/ServerObjectives/Map_LanesObjective.json` | схема L1: 14 строений (id, side, lane, kind T1/T2/Core, x, z, footprint), пути Линий (по 3, массивы точек), точки спавна Волн, лагеря Леса, Фонтаны. **Только позиции и геометрия** — HP, урон и радиусы в серверном конфиге режима, в отличие от `Map_ThroneWarsObjective.json` |
+| `Assets/ServerMaps/Map_LanesNav.json` | граф проходимости (узлы + рёбра) для крипов вне Линии и ботов в Лесу — если 04 выберет граф, а не свою навигацию |
+| `Assets/ServerHitboxes/Creep_*.json` | хитбоксы крипов из префабов (`ServerHitboxExporter`) |
 
-- **Выбор поведения:** простая utility-оценка с гистерезисом, тик 4–5 раз/с.
-- **Распределение по Линиям** (например 1–1–2 + Лес) — из 02, задаётся в `BotProfile`.
-- **Сложность:** существующий `BotDifficulty {Easy, Hard}` переносим в `BotProfile` (SO) и расширяем: время реакции, ошибка прицела, порог отступления, качество сборки.
-- **Навигация** — §3.2 (`CalculatePath` + `BotSteering`).
-- **[фаза 1]** Боты добора и боты-замены ливеров (см. 01) живут **на сервере**. Клиент их только показывает, как обычных сетевых героев, с пометкой «бот» в скорборде. Значит, `HeroBotBrain` в фазе 1 нужен на сервере, а не в клиенте. Это аргумент в выборе сетевого решения (§8).
+- **Мини-карта.** Сборщик рендерит вид сверху в `Assets/Lanes/Minimap.png` (как `RenderPreview` у Throne Wars) и пишет границы карты в `LanesUiSettings`. В рантайме мини-карта — статичная картинка с иконками, без камеры.
+- **Проверка** `LanesVerification` (по образцу `ThroneWarsVerification`):
+  - 12 Башен + 2 Ядра, 10 спавнов, 3 пути;
+  - спавны на поверхности;
+  - вейпоинты не внутри боксов коллизий;
+  - экспорт совпадает со сценой;
+  - Play Mode на фикстурах `lanes_state`/`units_state`: обломки, устаревший снапшот, пул.
+- **Синхронизация с сервером:** скрипт по образцу `tools/sync_throne_map.py` (04). Сцену добавляем в Build Settings. Сервер включает карту только после того, как сцена попала в сборку клиента.
 
 ## 6. HUD и UI
 
-Общее: uGUI + TextMeshPro, как сейчас. Всё на префабах, ссылки через `[SerializeField]`, раскладку и цвета брат настраивает в инспекторе. Без layout'ов и констант в коде. Canvas'ы разнесены по частоте обновления, чтобы не перестраивать весь HUD каждый кадр: статичный HUD / динамичный HUD (таймеры, Золото, HP) / WorldBars / Магазин / оверлеи. `SafeAreaFitter` под вырезы экрана. Только горизонтальная ориентация. Строки — из таблицы локализации (сейчас «ПОБЕДА» и прочие захардкожены).
+Всё через `LanesUiSettings` (ScriptableObject в `Resources/`) со ссылками на префабы View-компонентов. Префабы и сцену ставит `Tools → Modes → Install Lanes` (по образцу `Classic5v5PrefabsSetup`). Существующие префабы он не перезаписывает, поэтому правки брата в инспекторе сохраняются. Строки для игрока по-русски, кнопки ≥ 44 pt, джойстик (левый низ) и зону камеры не перекрываем.
 
 ### 6.1. Постоянно на экране
 
 ```
-┌───────────────────────────────────────────────────────────────────┐
-│[Мини-карта]     12:34   Синие 8 : 5 Красные           [💰 1250][🛒]│
-│                 (оповещения: «Наша Башня атакована»)  [⚡Быстро]  │
-│                                                        киллфид ×3  │
-│                                                                    │
-│                              +  (прицел)                           │
-│                                                                    │
-│ (джойстик)                [▓▓▓▓▓▓░░ 640/900]          [Стрельба]   │
-│                           [П1][П2][П3][П4][П5][П6]    [Прыжок][ADS]│
-│                           [Р1][Р2] [⟲ База] [📍Пинг]  [Присед][Перез]│
-└───────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│[Мини-карта]    12:34  ПАЛАДИНЫ 8 : 5 НЕЖИТЬ        [$ 1250][🛒]  │
+│                «Наша Башня атакована»              [⚡ Быстро]    │
+│                                                    лента ×3      │
+│                             +                                    │
+│ (джойстик)            [▓▓▓▓▓░░ 640/900]            [Стрельба]    │
+│                       [П1][П2][П3][П4]  [Р1][Р2]   [Прыжок][…]   │
+│                       [⟲ Возврат 6]  [📍]                         │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-- Мини-карта (верх-лево), таймер матча и счёт убийств по командам (верх-центр), Золото + кнопка Магазина + «Быстрая покупка» (верх-право), киллфид (3 строки).
-- Полоса HP героя с числом — вместо текущего `PlayerHealth.hpText`. Под ней 6 слотов Предметов (иконки, число слотов из 02) и 2 слота расходников с зарядами.
-- Справа остаются текущие кнопки стрельбы. Новые кнопки (§7) ставим так, чтобы не перекрывать зону свайпа камеры.
+`LanesHudView` растёт из `Classic5v5HudView` (Деньги, «+N», броня, панель возрождения) и добавляет:
+- полосу HP с `maxHp`;
+- 4 слота Предметов и 2 слота расходников с зарядами и откатом;
+- кнопки Магазина, быстрой покупки, Возврата и пинга;
+- ленту убийств и оповещения из `lanes_events` с ограничением частоты.
 
-### 6.2. По тапу / по событию
+### 6.2. Мини-карта (`LanesMinimapView`)
 
-- **Скорборд** — по удержанию, как сейчас (`HoldToShowScoreboard`).
-- **Увеличенная мини-карта** — тап по мини-карте.
-- **Магазин** — кнопка 🛒 (§6.4).
-- **`DeathOverlay`** при смерти: крупный Таймер респауна, кто убил (иконка, оружие), кнопка «Магазин» (если покупка мёртвым разрешена — вопрос 02). Камера — плавный облёт к своему Фонтану или наблюдение за союзником (вопрос 12).
-- **Оповещения:** «Наша Башня атакована», «Башня уничтожена», «Волна крипов вышла», «Ядро под атакой». Тост + вспышка иконки на мини-карте. Частоту ограничиваем.
-- **Пауза** [фаза 0]: кнопка и автопауза по `OnApplicationPause` (требование 01).
+- Статичная картинка + иконки из пула, обновление 5 Гц, отдельный Canvas.
+- **Что на ней:**
+  - строения (живые / щит / обломки) из `lanes_state`;
+  - фронт Волн (6 маркеров) из `lanes_state`;
+  - лагеря Леса;
+  - союзники всегда, свой герой со стрелкой взгляда;
+  - враги — по правилам видимости 02 (сервер не шлёт тех, кого не видно);
+  - пинги.
+- Тап — увеличить на полэкрана. Тап по увеличенной карте ставит пинг в точку.
 
-### 6.3. Мир
+### 6.3. Полосы HP (`WorldBarsView`)
 
-- Полосы HP над крипами, Башнями и героями цветом команды. Над героями — имя. Над Ядром полоса крупнее, при атаке дублируется в HUD.
-- `WorldBarsManager`: пул screen-space полос. Позиции пересчитываем в `LateUpdate` только для видимых юнитов ближе N м (N в конфиге). Полоса появляется после первого урона и прячется через несколько секунд без урона. Так на экране не будет «леса» из сотни полос.
-- Всплывающее «+N» Золота при добивании и убийстве. Кольцо радиуса Башни (§4.4).
+- Один пул screen-space полос на отдельном Canvas, позиции пересчитываются в `LateUpdate`.
+- Показываем для крипов и героев в кадре, ближе N м и после урона, гаснут через несколько секунд. Для строений — всегда в пределах дистанции, с иконкой щита.
+- Цвет — сторона относительно своего игрока (свои / чужие), а не Паладин/Нежить.
+- Над вражеским героем — ник с `richText=false`.
+- Вместо мирового TMP-текста `ThroneWarsBuilding.label` — та же полоса: меньше перестроек.
 
-### 6.4. Магазин Предметов (`ShopScreen`)
+### 6.4. Магазин Предметов (расширение 5v5)
 
-- **Открытие** не ставит игру на паузу (иначе фаза 1 не сойдётся). Панель занимает правые ~2/3 экрана, джойстик слева остаётся активен. Свайп-камеру блокируем на время показа, как это уже делает `Round2v2Manager.SetShop → EnsureCameraEnabled`.
-- **Где покупать:** только в зоне Фонтана (`InFountain`). Вне Фонтана Магазин открывается в режиме просмотра, кнопки «Купить» неактивны и подписаны «Вернитесь на базу».
-- **Разделы:** «Рекомендованное» (из `BotBuildDefinition`/`ShopCatalog`, тот же список, что у ботов) и категории **Атака / Защита / Мобильность / Расходники**. Плюс **Оружие**, если оружие покупается в режиме (вопрос 4).
-- **Карточка Предмета** — префаб `ShopItemCardUI`: иконка, цена, состояния «доступно / не хватает Золота / куплено / слоты заняты». Визуально переиспользуем стиль `MainMenu/ItemCardUI`, но **данные отдельные**: `MatchItemDefinition`, а не косметический `ItemData`. Имена разводим, чтобы не путать.
-- **Деталь Предмета:** статы (через `StatService` показываем «было → станет»), описание, кнопки «Купить», «Продать» (цена продажи из 02) и «Отменить последнюю покупку», если 02 её разрешит.
-- **«Быстрая покупка»** на HUD показывает иконку следующего рекомендованного доступного Предмета. В Фонтане покупка в один тап, без открытия экрана.
-- Если в 02 будут рецепты/улучшения, показываем дерево компонентов в детали Предмета. Это +M к оценке.
+- `LanesShopView` (из `Classic5v5BuyMenuView`). Панель на правые ~2/3 экрана, джойстик остаётся активен, свайп-камера на время показа заблокирована. Игра на паузу не встаёт, матч онлайн.
+- Вкладки: **Рекомендованное** (по `recOrder` с сервера) / **Оружие** / **Атака** / **Защита** / **Мобильность** / **Расходники**.
+- **Карточка** `LanesItemCardView` (из `Classic5v5BuyCardView`): иконка, цена, состояния «доступно / не хватает Денег / куплено / слоты заняты / нужен базовый», стрелка улучшения.
+- **Деталь:** статы «было → станет» из `stats` с сервера, «Купить», «Продать» (сумму возврата пишет сервер в `sell_ok`).
+- **Где покупать** решает сервер (`inFountain`; при смерти — по 02). Вне Фонтана Магазин работает на просмотр с подписью «Вернитесь в Фонтан». Отказы — текстом из `buy_failed`.
+- **«Быстрая покупка»** — следующий по `recOrder` Предмет, на который хватает Денег, одним тапом.
+- **Тексты и иконки Предметов** — `LanesItemCatalog` (SO по `itemId`: иконка, название, шаблон описания `+{dmg} % урона`). Неизвестный `itemId` показывается заглушкой «?» с `Debug.LogError` — то же правило, что для скинов.
 
-### 6.5. Скорборд 5v5 (расширение `ScoreboardUI`)
+### 6.5. Таблица на 10, смерть, конец матча, меню
 
-Две колонки по 5 строк (`ScoreboardRowUI`). В строке: иконка тела/скина, имя (+ метка «бот»), K/D/A, добивания, 6 мини-иконок Предметов, Таймер респауна у мёртвых. Над колонками — счёт и число живых Башен. Видимость Золота соперника — решение 01/02, по умолчанию скрыто. Данные берём из `MatchStats` (рефактор) и `HeroRoster`. Поля `roundsText` и `roundManager` в режиме не используются.
-
-### 6.6. Конец матча (`MatchEndScreen`)
-
-«Победа / Поражение», длительность, MVP (критерий — 02), таблица 5v5 как в скорборде плюс урон по строениям и заработанное Золото. Кнопки «В меню» и «Ещё раз» [фаза 0] / «Найти снова» [фаза 1]. Награды [фаза 1] приходят от сервера (04), [фаза 0] — локально, если 01 их оставит.
-
-### 6.7. Главное меню и лобби (`MainMenu/`)
-
-- **Выбор режима** (2v2 / «Линии» 5v5) — карточки режимов из `GameModeDefinition` (SO: сцена, иконка, описание). `OnPlayPressed` грузит сцену по имени, а не `LoadScene(1)`.
-- **[фаза 0]** «Играть с ботами» + выбор сложности. Экран загрузки с 10 участниками.
-- **[фаза 1]** «Найти матч» → экран очереди (время поиска, «Отмена») → «Матч найден» (подтверждение — по решению 04) → загрузка с 10 игроками и пингом. Проверка активного матча при запуске для переподключения (01). Пати — фаза 1.5.
+- **Таблица** — `ScoreboardUI.FillSortedRows` + новый `LanesScoreRowView`: имя, метка «бот», K/D/A, добивания, 4 иконки Предметов, Таймер респауна. Две колонки по стороне, своя сверху. Держится по удержанию, как сейчас (`HoldToShowScoreboard`). Данные — `lanes_board`.
+- **Смерть:** панель возрождения из `Classic5v5HudView` с отсчётом `respawnIn`, кто убил и кнопкой «Магазин», если покупка мёртвым разрешена.
+- **Конец матча:** `MatchOverUI` с явной подписью «Ядро Нежити уничтожено» / «Ваше Ядро уничтожено» и таблицей итогов. Награды приходят от API, как в других режимах.
+- **Меню:** карточка «Линии 5v5» в выборе режима (по образцу изменений Throne Wars в `MenuController`). Дальше существующие очередь, «матч найден» и выбор стороны.
 
 ## 7. Управление на мобиле
 
-Остаётся текущее: джойстик, свайп-камера, стрельба, прыжок, присед, перезарядка, ADS, нож и оружие. Добавляем:
+К текущему (джойстик, свайп, стрельба, прыжок, присед, перезарядка, ADS, смена оружия) добавляем:
 
 | Кнопка | Поведение |
 |---|---|
-| 🛒 Магазин | Тап — открыть/закрыть (§6.4) |
-| ⚡ Быстрая покупка | Тап — купить следующий рекомендованный Предмет (только в Фонтане) |
-| ⟲ На базу (Recall) | Тап — начать канал возврата (время из 02), кольцо прогресса. Прерывается уроном, движением или повторным тапом |
-| Р1/Р2 Расходники | Тап — использовать (заряды, кулдаун на иконке) |
-| 📍 Пинг | Короткий тап — «Внимание» в точку под прицелом (луч из центра экрана, как у `MobileShoot`). Удержание — радиальное меню: «Атакуем», «Отступаем», «Нужна помощь», «Защищаем Башню», «Враг пропал». Тап по увеличенной мини-карте ставит пинг в точку карты. Лимит частоты. [фаза 0] пинги получают боты, [фаза 1] уходят на сервер и рассылаются команде |
-| Мини-карта | Тап — увеличить, повторный тап — свернуть |
-| ⏸ Пауза | [фаза 0] только офлайн |
+| 🛒 Магазин | открыть/закрыть (§6.4) |
+| ⚡ Быстрая покупка | `buy` следующего рекомендованного |
+| ⟲ Возврат | `recall:start`, кольцо по `recallLeft`. Сдвиг джойстика или повторный тап шлёт `recall:cancel` сразу, не дожидаясь сервера. Отмену уроном решает сервер (`recall_cancel`) |
+| Р1/Р2 | `use_item` по слоту, откат на иконке |
+| 📍 Пинг | Короткий тап — «Внимание» в точку под прицелом (луч из центра экрана). Удержание — радиальное меню: «Атакуем», «Отступаем», «Нужна помощь», «Защищаем Башню», «Враг пропал». Тап по увеличенной мини-карте — пинг в точку |
+| Мини-карта | тап — увеличить/свернуть |
 
-Редактор раскладки кнопок — вне MVP (вопрос 15).
+`PauseMenu` в онлайне только открывает настройки, матч идёт. Кнопки ставятся в префаб HUD, `HUDSettingsUI` их не двигает (раскладка — вопрос 7).
 
-## 8. Сеть [фаза 1]
+## 8. Производительность и бюджет
 
-### 8.1. Важная находка
-
-Рядом, в проекте CS Magic (`~/Desktop/Проекты/CS_Magic_MVP` + `CSMagic.Server`), уже есть собственный сетевой стек того же семейства кода (те же `Round2v2Manager`, `EnemyChase`, `AllyChase`):
-- UDP-клиент `GameNetworkClient` / `GameServerClient`;
-- буфер снапшотов `ServerWorldSnapshotBuffer` с `MovementSequence`;
-- клиент очереди `MatchQueueClient`;
-- авторитетный `CSMagic.MatchServer` на .NET с режимами, включая командный бой 5v5.
-
-Я смотрел его только поверхностно. Если SWOSH и CS Magic — одна команда и линейка продуктов, вариант «свой UDP» означает **доработку существующего**, а не разработку с нуля. Это решение для владельца и бэкенда (вопрос 2).
-
-### 8.2. Варианты
-
-| Вариант | Плюсы | Минусы |
-|---|---|---|
-| **A. Свой UDP-клиент + свой .NET-сервер** (как в CS Magic) | Полный контроль над протоколом и трафиком. Дешёвый хостинг (сервер без Unity). Опыт и, возможно, код уже есть | Крипы, Башни, пути и попадания придётся симулировать на сервере без Unity: нужны экспорт геометрии и путей Линий, серверная навигация (вейпоинты + простая коллизия). Предсказание и интерполяцию пишем сами |
-| **B. Netcode for GameObjects** + Unity headless dedicated server | Официальный, сервер переиспользует C#, NavMesh и физику клиента | Встроенного клиентского предсказания и сверки нет. Накладные расходы на ~100 `NetworkObject`. Unity-сервер дороже по CPU/RAM на матч |
-| **C. Fish-Net** (или Mirror) + Unity headless server | Бесплатный open-source. У Fish-Net есть встроенное клиентское предсказание. Переиспользует код фазы 0 почти напрямую (тот же `HeroBotBrain` на сервере) | Те же расходы на Unity-сервер. Зависимость от сообщества |
-| **D. Photon Fusion 2** | Лучшее из коробки: предсказание, лаг-компенсация, interest management | Оплата за CCU и вендор-лок. **Оплата и доступность из РФ под вопросом** — нужно проверить до выбора |
-
-**Рекомендация.** Если бэкенд (04) подтвердит, что стек CS Magic переиспользуется, — **A**. Иначе — **C (Fish-Net)**: сервер переиспользует код фазы 0 (крипы, NavMesh, боты), а мы не пишем предсказание сами. B не берём из-за отсутствия предсказания, D — из-за рисков оплаты и стоимости. Клиентская модель ниже от варианта не зависит.
-
-### 8.3. Модель клиента
-
-- **Свой герой — клиентское предсказание.** Ввод с номером `seq` применяется локально сразу и уходит на сервер. В снапшоте сервер возвращает `lastProcessedInputSeq` и авторитетную позицию. Клиент откатывается, переигрывает неподтверждённые вводы и плавно гасит мелкую ошибку (без рывков камеры). `MobileMovement` для этого нужно сделать детерминированно-шаговым: движение как функция `(state, input, dt)` — это M-рефактор.
-- **Стрельба.** Дульная вспышка, трассер, отдача и звук — мгновенно на клиенте. Попадание, урон и смерть — **только от сервера**: хитмаркер по `HitConfirm`. Клиент отправляет выстрел с тиком клиента и лучом прицела. Лаг-компенсация (откат хитбоксов) — на сервере (04). Медленные снаряды текущих пушек (`MagicBullet`, 16–19 м/с) сервер тоже должен симулировать — вопрос 18.
-- **Чужие герои** — интерполяция снапшотов с буфером ~100 мс (2–3 снапшота). Экстраполяция не дальше одного снапшота, потом заморозка.
-- **Крипы, Башни, Ядро — только интерполяция с сервера.** Клиентский AI крипов в фазе 1 выключен. Снаряды дальних крипов и Башен не реплицируются: сервер шлёт событие атаки `(attacker, target, tick)`, а клиент сам рисует летящий снаряд через `ProjectileVisualSystem`.
-- **Золото, Предметы, кулдауны, Таймер респауна** — авторитет сервера. Покупка — запрос и ответ. Кнопка показывает «ожидание», Золото меняется только по ответу. Оптимистичного списания нет: это деньги матча, и рассинхрон хуже 50 мс задержки.
-- **Время:** клиент оценивает RTT и смещение до серверного тика по снапшотам.
-- **Переподключение:** при входе клиент получает полный снапшот и восстанавливает HUD и инвентарь целиком из него.
-
-### 8.4. Контракт сообщений (что клиент ждёт от сервера)
-
-Это ожидание клиента. Форматы, частоты и транспорт финализирует 04. Предлагаемые частоты: симуляция сервера 30 Гц, снапшоты 20 Гц, ввод 30 Гц.
-
-| Направление | Сообщение | Канал | Содержимое |
-|---|---|---|---|
-| C→S | `Join` | надёжный | токен матча, matchId, версия клиента, хэш конфига баланса |
-| C→S | `Input` | ненадёжный, с избыточностью (последние 3 ввода) | seq, клиентский тик, вектор движения, yaw/pitch, кнопки (прыжок, присед, ADS) |
-| C→S | `Fire` / `Reload` / `SwitchWeapon` | надёжный | seq, тик, weaponId, origin, direction |
-| C→S | `BuyItem` / `SellItem` / `UseConsumable` | надёжный | itemId или slot, requestId |
-| C→S | `Recall` | надёжный | start / cancel |
-| C→S | `Ping` | надёжный | тип, точка или targetId |
-| C→S | `Leave` | надёжный | — |
-| S→C | `JoinAccepted` | надёжный | мой слот, команда, ростер 10 (имя, скин, бот/человек), серверный тик, ID карты и конфига |
-| S→C | `Snapshot` | ненадёжный, дельта к подтверждённому | tick, lastProcessedInputSeq, герои (позиция, yaw/pitch, HP, состояние, оружие), юниты (id, тип, квантованная позиция, HP, состояние, targetId), строения (HP, уязвимость) |
-| S→C | `Damage` / `HitConfirm` | надёжный | attacker, victim, amount, крит/неуязвим |
-| S→C | `UnitAttack` | ненадёжный | attacker, target, tick (для визуала снарядов) |
-| S→C | `Death` | надёжный | victim, killer, assists[], начисления Золота |
-| S→C | `Respawn` | надёжный | слот, время респауна, точка |
-| S→C | `GoldChanged` | надёжный | слот, новое значение, причина (добивание/убийство/Башня/пассив) |
-| S→C | `InventoryChanged` / `PurchaseResult` | надёжный | слот, предметы[], requestId, ok или код ошибки (нет Золота, не в Фонтане, нет слота) |
-| S→C | `StructureDestroyed`, `WaveSpawned` | надёжный | id, команда |
-| S→C | `MatchPhase` / `MatchEnd` | надёжный | фаза, стартовый тик / победитель, итоговая статистика, награды |
-| S→C | `PingRelay`, `Error/Kick` | надёжный | — |
-
-Требования к контракту со стороны клиента:
-1. **Все Предметы, юниты, оружие и строения — по стабильным ID из общего конфига.** SO клиента остаются источником правды и экспортируются в JSON для сервера. При несовпадении хэша конфига клиент требует обновление.
-2. **Interest management по дистанции:** ближние юниты — 20 Гц, дальние — 5 Гц.
-3. **Если в 02 будет видимость / туман войны**, сервер не шлёт врагов вне видимости (античит, 04).
-4. Бюджет трафика — §9.
-
-## 9. Производительность и бюджет
-
-**Целевые устройства.** Финальный выбор за 01 (вопрос 8 там). Предложение:
-
-| Тир | Пример | Цель |
-|---|---|---|
-| Low (эталонный слабый, критерий вех) | Android 2021, Helio G88 / Snapdragon 680, Mali-G52, 4 ГБ | стабильные **30 FPS**, URP Low |
-| Mid | Snapdragon 778G / iPhone XR–11 | 60 FPS, URP Medium |
-| High | флагманы | 60 FPS, URP High |
-
-**Бюджет кадра на Low (33 мс при 30 FPS, CPU main ≤ 22 мс с запасом на троттлинг):**
-
-| Статья | Бюджет |
+| Параметр | Цель на эталонном слабом Android (выбор устройства — 01) |
 |---|---|
-| AI и геймплей (тики, сетка, сервисы) | ≤ 4 мс |
-| Анимация | ≤ 3 мс |
-| Физика (пули героев, герои) | ≤ 2 мс |
-| UI (HUD, полосы HP) | ≤ 2 мс |
-| Рендер (подготовка) | ≤ 7 мс |
-| Draw calls / SetPass | ≤ 150 / ≤ 60 |
-| Треугольники в кадре | ≤ 300 тыс. |
-| Память процесса | ≤ 1 ГБ, текстуры ASTC, без утечек между матчами |
-| GC-аллокации в матче | 0 Б/кадр в установившемся режиме |
-| Батарея | ≤ 7 % за матч (требование 01), без падения FPS > 20 % к 15-й минуте от нагрева |
-| Трафик [фаза 1] | ≤ 15 КБ/с вниз, ≤ 4 КБ/с вверх в среднем |
-
-**Рендер на Low:** запечённый свет, одна направленная лампа, тени выключены или с одной короткой каскадной дистанцией, пост-обработка выключена, ограничение 30 FPS. Тир определяется автоматически по устройству, ручной выбор — в настройках. Пакет Adaptive Performance уже подключён как модуль — пробуем на Samsung.
+| FPS | стабильные 30 (сейчас `GamePerformanceSettings` ставит 60 для всех). Для Lanes на слабом тире 30, на остальных 60 |
+| CPU main | ≤ 22 мс: юниты + парсинг ≤ 3 мс, анимация ≤ 3 мс, физика ≤ 1.5 мс, UI ≤ 2 мс, рендер ≤ 7 мс |
+| Draw calls / SetPass | ≤ 150 / ≤ 60; треугольники в кадре ≤ 300 тыс. |
+| GC в матче | 0 Б/кадр в установившемся режиме (кроме разборов на 1 Гц) |
+| Память | ≤ 1 ГБ, текстуры ASTC, без роста от матча к матчу |
+| Батарея / нагрев | ≤ 7 % за матч (01), FPS к 15-й минуте падает не больше чем на 20 % |
+| Трафик вниз | ≤ 60 КБ/с суммарно. `units_state` 10 Гц × 1–2 пакета по ≤ 1.2 КБ ≈ 12–24 КБ/с. **`players_state` 30 Гц на 10 игроков — замерить до старта**: при ~120–150 байт на игрока это ~1.5 КБ на пакет (выше порога фрагментации) и ~45 КБ/с. Это касается и Classic5v5 |
 
 **Как меряем:**
-- **Стресс-сцена `Lanes_Stress`:** полная карта, 10 ботов, Волны с удвоенным составом, 5 минут автоигры. Через `FrameTimingManager` и `ProfilerRecorder` пишет в файл p50/p95/p99 времени кадра, GC и память. Запускается на эталонном устройстве **на каждой вехе** (критерий M1/M2 из 01).
-- **Инструменты:** Unity Profiler по USB (dev-сборка), Profile Analyzer для сравнения до/после, Memory Profiler, Frame Debugger, Android GPU Inspector, на iOS — Xcode Instruments. Свои `ProfilerMarker` в `AITickScheduler`, `WorldBarsManager`, `ProjectileVisualSystem`.
-- **Батарея:** 3 матча подряд на эталонном устройстве, замер заряда и температуры.
+- Счётчики `DeveloperHUD` (там уже есть `Projectiles`): юниты на экране, байты/с по типам сообщений, потерянные части `units_state`.
+- `FPSCounter`.
+- Unity Profiler по USB на dev-сборке, Memory Profiler.
+- **Стресс-прогон:** локальный матч-сервер Lanes с 9 ботами + реальный клиент на телефоне через adb (как `throne_network_smoke.py`), 15 минут, лог p50/p95/p99 времени кадра и температуры.
 
-## 10. Тестирование и вехи клиента
+## 9. Тестирование
 
-### 10.1. Что автоматизируем (Unity Test Framework 1.6.0 уже в проекте)
+- **Компиляция без Unity:** `~/Desktop/Проекты/_compile/check.sh <ветка>` = 0 ошибок (CI клиента не собирает — нет лицензии).
+- **EditMode:**
+  - парсеры `match_state` (Lanes, 5v5 и Siege не путаются), `units_state`, `lanes_state`, `lanes_events`, `shop` с новыми и старыми полями, `buy_ok` с хвостом;
+  - битые строки и лишние поля в конце не роняют парсер;
+  - буфер интерполяции: порядок, дубли, пропуски, экстраполяция.
+- **Play Mode** `LanesVerification`: карта и экспорт (§5), фикстуры состояний, пул (100 появлений и исчезновений без роста объектов), обломки, устаревшие снапшоты.
+- **Сетевой смоук:** локальный сервер + боты + клиент-наблюдатель (csmagic-qa / csmagic-match-server). Волны идут, строения падают, покупка, продажа, Возврат, переподключение восстанавливает Предметы и разрушения.
+- **Вручную (чек-лист для брата):** читаемость полос HP и мини-карты, быстрая покупка ≤ 2 c, Возврат прерывается, пинги, кнопки не мешают свайпу, 3 матча подряд на слабом телефоне, плохая сеть (100 мс / 2 %, 200 мс / 5 %, обрыв 30 c).
 
-- **EditMode** (чистая логика без сцены): начисление Золота по причинам; Магазин (хватает Золота, не в Фонтане, слоты заняты, продажа); сложение статов от Предметов; формула Таймера респауна; выбор цели крипа по приоритету; состав Волны по времени матча; переходы FSM крипа и `LanesMatchManager`; парсинг и экспорт конфига (стабильные ID, нет дублей).
-- **PlayMode** (тестовая мини-карта): Волна доходит до вражеской T1 за ожидаемое время; Башня убивает крипа; T2 неуязвима при живой T1; уничтожение Ядра → `MatchOver`; 10 ботов на ускоренном `timeScale` доигрывают матч без исключений и застреваний (лог «застрял > N с»).
-- **Ограничение:** CI сейчас не компилирует Unity (нет лицензии), поэтому тесты гоняем локально перед PR. Для проверки компиляции без Unity можно адаптировать скрипт из CS Magic (`~/Desktop/Проекты/_compile/check.sh`).
+## 10. Вехи клиента и оценка (1 клиентский разработчик; арт карты и сервер не входят)
 
-### 10.2. Вручную
-
-- **Чек-лист на эталонном устройстве на каждой вехе:** читаемость HP-полос и мини-карты; быстрая покупка ≤ 2 с, обычная ≤ 5 с; кнопки не мешают свайпу; Recall прерывается; пинги; пауза при звонке/сворачивании [фаза 0]; нагрев за 3 матча.
-- **[фаза 1]** Эмуляция сети (Network Link Conditioner / Clumsy): 100 мс и 2 % потерь, 200 мс и 5 % потерь, обрыв на 30 с с переподключением; 2–4 реальных телефона в одном матче.
-
-### 10.3. Вехи клиента (привязаны к вехам 01)
-
-| Веха клиента | Содержание | Оценка |
+| Веха | Содержание | Оценка |
 |---|---|---|
-| **K0** перед M1 | Рефакторинг основы: `Team`, `ActorIdentity`, `Health`, `MatchPhase`, пул `MagicBullet`, `UnitRegistry`, `AITickScheduler`, SO-конфиги. Регресс 2v2 | 2 нед |
-| **K1 = M1 «Одна Линия»** | Блокаут одной Линии, NavMesh, `LanePath`, `WaveDirector`, крипы, Башня, Ядро, Золото за добивание, 3–4 Предмета, простой Магазин, 2v2 на ботах. **Стресс-замер на слабом устройстве — go/no-go по числу юнитов** | 3 нед |
-| **K2 = M2 «Офлайн MVP 5v5»** | 3 Линии + Лес, 12 Башен, `HeroBotBrain` ×9, Таймер респауна, Recall, пинги, полный HUD, мини-карта, оповещения, скорборд 5v5, экран итогов, выбор режима, пауза | 4–5 нед |
-| **K3 = M3 выпуск офлайна** | Тиры качества, оптимизация до бюджета, локализация строк, автотесты, баги | 2 нед |
-| **N1 = M4 сетевой срез** | Сетевой клиент, предсказание своего героя, интерполяция чужих, одна Линия с серверными крипами, покупка через сервер, переподключение | 4–6 нед (зависит от варианта §8) |
-| **N2 = M5/M6** | Полная карта по сети, очередь и лобби в меню, добор ботами (отображение), interest management, полировка неткода | 4–6 нед |
+| **K0. Основа** | Режим в `GameModeSelection`/ресиверах, `LanesManager` на каркасе Throne Wars, блокаут `Map_Lanes` сборщиком + экспорт + `LanesVerification`. Зависит от влития 5v5 и Throne Wars в `test` (вопрос 1) | 1.5 нед |
+| **K1. Юниты и строения** | `units_state` + буфер + `CreepView`-пул, `lanes_state` + `LanesBuildingView`, `lanes_events` (Деньги «+N», снос, Волны). Игра на одной Линии против локального сервера. **Стресс-замер на слабом телефоне — go/no-go по числу крипов** | 2.5 нед |
+| **K2. Экономика** | Магазин с вкладками и улучшениями, слоты, расходники, продажа и отмена, быстрая покупка, Возврат | 2 нед |
+| **K3. UI режима** | Мини-карта, полосы HP, таблица на 10, оповещения, пинги, смерть и итоги, карточка в меню, установщик `Install Lanes` | 2 нед |
+| **K4. Довод** | Тиры качества и 30 FPS, LOD/аниматоры, трафик, арт-карта вместо блокаута, тесты, баги с живыми 10 игроками | 1.5–2 нед |
 
-Итого (грубо, один клиентский разработчик): **фаза 0 ≈ 11–12 недель, фаза 1 ≈ ещё 8–12 недель**. Карта и арт, а также серверная часть в оценку не входят.
+Итого **≈ 9.5–10 недель** клиента. Параллельно нужны серверная часть (04) и арт карты.
 
-## 11. Открытые вопросы
+## 11. Открытые вопросы (у каждого — решение по умолчанию)
 
-1. **Фаза 0 сначала или сразу онлайн?** (главный, решает владелец). *Рекомендация:* фаза 0, как в 01. Клиентский код с самого начала пишем с развязкой «симуляция ↔ представление» (§1.1), тогда в фазу 1 переходит HUD, Магазин, конфиги и вью целиком.
-2. **Переиспользуем ли сетевой стек CS Magic** (UDP-клиент, снапшоты, `CSMagic.MatchServer` с 5v5)? *Рекомендация:* да, если это одна команда и продукт. До выбора варианта в §8 бэкенду (04) нужно оценить, сколько стоит добавить на этот сервер крипов, Башни и экономику.
-3. **Сетевое решение.** *Рекомендация:* A (свой UDP) при положительном ответе на вопрос 2, иначе C (Fish-Net). Photon Fusion — только если оплата из РФ реальна и укладывается в бюджет.
-4. **Покупается ли оружие (3 текущих) в Магазине режима как Предмет или выбирается до матча?** (02) *Рекомендация:* категория «Оружие» в Магазине поверх существующего `MobileShoot.SetWeapon`. Так переиспользуется код фазы покупки 2v2.
-5. **Есть ли у героев способности/классы?** В брифе нет — все герои одинаковые и различаются Предметами. *Рекомендация:* в MVP без способностей. Иначе +L на UI кнопок способностей и баланс.
-6. **Видимость / туман войны и что показывает мини-карта.** (02, 04) *Рекомендация:* враги на мини-карте только в радиусе видимости союзных юнитов и строений. В фазе 1 это же правило служит античитом (сервер не шлёт невидимых).
-7. **Можно ли покупать мёртвым?** (02) *Рекомендация:* да: мёртвый игрок всё равно возрождается в Фонтане, а это занимает время Таймера респауна.
-8. **Правило Золота за добивание в FPS** (только последний удар или доля всем рядом?). (02) Клиенту нужно знать, когда показывать «+N». *Рекомендация:* последний удар получает основное, рядом стоящие союзники — малую долю, чтобы не наказывать за «чужой» ласт-хит в шутере.
-9. **Пиковое число одновременно живых юнитов.** (02) Клиенту нужен потолок ≤ 100 на Low (крипы + герои + строения). *Рекомендация:* размер Волны и интервал подбирать так, чтобы на одной Линии одновременно было не больше 2–3 Волн. Финал — после стресс-замера K1.
-10. **Шкала HP и урона.** Сейчас HP = 3, урон 1–3 (`int`). С процентными бонусами Предметов это не работает. (02) *Рекомендация:* HP в сотнях, урон `int` после модификаторов, округление в одной функции.
-11. **Числа, без которых клиент не начнёт K1** (02): интервал и состав Волны, радиусы агро и поводка, дальности атак крипов и Башен, время Recall, число слотов Предметов и расходников, формула Таймера респауна, правила уязвимости строений.
-12. **Камера при смерти.** *Рекомендация:* 2 с на убийцу, затем наблюдение за союзником по выбору свайпом. Без отдельной «свободной камеры».
-13. **Пауза в офлайне при сворачивании** — сделаем (01). В фазе 1 пауза невозможна, вместо неё бот-замена на сервере.
-14. **Локализация.** *Рекомендация:* сразу ввести таблицу строк (простой SO или Unity Localization) — новых строк в режиме много.
-15. **Редактор раскладки кнопок.** *Рекомендация:* не в MVP. Кнопок становится много — вернуться после плейтестов M2.
-16. **Мини-карта:** RenderTexture-камера или статичная картинка? *Рекомендация:* статичная запечённая картинка карты + иконки: дешевле на слабых устройствах.
-17. **Отдельная сцена режима.** *Рекомендация:* да, `Lanes5v5.unity`. 2v2 остаётся в `SampleScene` нетронутым.
-18. **[фаза 1] Попадания пуль героев: хитскан или снаряд на сервере?** Текущие пули — медленные Rigidbody-снаряды (`MagicBullet`). (02/04) *Рекомендация:* сохранить «магические» снаряды ради ощущения, но на сервере считать их отрезками пути за тик, без физики Unity. Решение влияет на выбор между A и C.
+1. **Зависимость от невлитых веток.** 5v5 (`feature/classic5v5-tdm`, PR #36) и Throne Wars (`cod/throne-wars-map`) не в `test`, серверный Throne Wars только в рабочей копии. *По умолчанию:* ветка Lanes начинается от `test` после влития 5v5. Если Throne Wars к старту K0 не влит, переносим `ThroneWarsBuilding`/сборщик в код Lanes копией и не ждём.
+2. **Метка режима в `match_state`.** 5v5 и Siege сейчас оба шлют 22 поля и различаются только по `p[11]`. *По умолчанию:* Lanes ставит `p[11]="Lanes"` и версию схемы в `p[12]`. Бэкенду предлагаем пометить так же и 5v5.
+3. **Названия команд в игре.** В брифе Синие/Красные, а в CS Magic стороны — Паладины/Нежить (скины, `SideSelect`, спавны `PaladinSpawn_N`). *По умолчанию:* в UI «Паладины / Нежить», цвет полос — «свои / чужие».
+4. **Прототипная карта.** *По умолчанию:* K1 гоняем на геометрии `Map_ThroneWars`: три Линии уже есть, лишние Башни скрываем. `Map_Lanes` (120×120 из 02) собираем параллельно и переключаемся на K2.
+5. **Видимость врагов** (туман войны, мини-карта). *По умолчанию:* как решит 02. Если 02 молчит — без тумана, враги на мини-карте видны в радиусе своих юнитов и строений, сервер фильтрует.
+6. **Ограничение кадров.** *По умолчанию:* 30 FPS на слабом тире в Lanes (батарея), 60 на остальных, переключатель в настройках.
+7. **Раскладка новых кнопок в `HUDSettingsUI`.** *По умолчанию:* не в первой версии, фиксированное место в префабе. Брат двигает его в инспекторе.
+8. **Опрос событий vs пуш.** *По умолчанию:* опрос `get_lanes_events` с `lastSeq` каждые 100 мс — в стиле текущего протокола. Пуш без запроса — если 04 захочет и это не сломает перепривязку сессии.
+9. **Размер `players_state` на 10.** *По умолчанию:* замерить в K0. Если больше 1200 байт — бэкенду разбить на части, как `units_state`. Касается и Classic5v5.
+10. **Метка «бот» и боты добора.** *По умолчанию:* боты живут на сервере (04), клиент показывает их как обычных игроков, с меткой из `lanes_board.isBot`.
