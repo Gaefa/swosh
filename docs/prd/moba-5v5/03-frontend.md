@@ -29,8 +29,9 @@
 |---|---|---|
 | Сеть матча: `GameNetworkClient` (один UDP-сокет, очередь приёма), `MatchStateReceiver` (опрос `get_match_state` раз в 1 c), `PlayersStateReceiver` (опрос `get_players_state` 30 Гц, `snapshot_v1`), `ServerWorldSnapshotBuffer` (интерполяция 100 мс, синхронизация часов, `LagCompensationClientState`), `ShootEventsReceiver`, `ProjectileHitEventsReceiver`, `ProjectileVisualMover`, `RemotePlayersManager` | `Assets/Scripts/...` | да |
 | `GameModeSelection` (без Classic5v5), `ModeBootstrapper` (знает только 2v2 и GunGame), `ScoreboardUI.FillSortedRows` (сортированные строки для GunGame/5v5), `MatchActorRegistry`/`MatchStats` (зашиты на 4 актёра) | там же | да |
-| Командный бой 5v5 на клиенте: `GameModes/Classic5v5/*` (`Classic5v5ShopClient`, `Classic5v5BuyMenuView`, `Classic5v5BuyCardView`, `Classic5v5HudView`, `Classic5v5UiSettings`, `Classic5v5TdmState`, `Classic2v2RoundManager.Tdm.cs`), `Editor/Classic5v5PrefabsSetup.cs`, `Editor/PassMapBuilder.cs`, `PlayerWeaponLoadout` (маска купленного) | `origin/feature/classic5v5-tdm` (PR #36) | **нет** |
-| Throne Wars на клиенте: `ThroneWarsManager`, `ThroneWarsBuilding`, `ThroneWarsState` (`match_state` из 22 полей, `p[11]="Siege"`, здания `S2;id,hp,unlocked,shot,x,y,z|…`), `Editor/ThroneWarsMapBuilder` + `ThroneWarsVerification`, экспорт `ServerMaps/`, `ServerSpawns/`, `ServerObjectives/Map_ThroneWarsObjective.json` | `origin/cod/throne-wars-map` | **нет** |
+| Командный бой 5v5 на клиенте: `GameModes/Classic5v5/*` (`Classic5v5ShopClient`, `Classic5v5BuyMenuView`, `Classic5v5BuyCardView`, `Classic5v5HudView`, `Classic5v5UiSettings`, `Classic5v5TdmState`, `Classic2v2RoundManager.Tdm.cs`), `Editor/Classic5v5PrefabsSetup.cs`, `Editor/PassMapBuilder.cs`, `PlayerWeaponLoadout` (маска купленного) | `origin/feature/5v5` (PR #36 закрыт) | **нет** |
+| Throne Wars на клиенте: `ThroneWarsManager`, `ThroneWarsBuilding`, `ThroneWarsState` (`match_state` из 22 полей, `p[11]="Siege"`, здания `S2;id,hp,unlocked,shot,x,y,z|…`), сцена `Map_ThroneWars_3` | `origin/test`, сцены нет в Build Settings | да |
+| `Editor/ThroneWarsMapBuilder` + `ThroneWarsVerification`, экспорт `ServerMaps/`, `ServerSpawns/`, `ServerObjectives/Map_ThroneWarsObjective.json` | `origin/cod/throne-wars-map` | **нет** |
 | Серверная часть Throne Wars (`ThroneWarsRules`, `ThroneTowerRules`) | только незакоммиченная рабочая копия `CSMagic.Server-throne-wars` | **нет** |
 
 ## 1. Архитектура клиента режима
@@ -384,7 +385,7 @@ p[22] maxHp  p[23] overtime 0/1
 
 ## 11. Открытые вопросы (у каждого — решение по умолчанию)
 
-1. **Зависимость от невлитых веток.** 5v5 (`feature/classic5v5-tdm`, PR #36) и Throne Wars (`cod/throne-wars-map`) не в `test`, серверный Throne Wars только в рабочей копии. *По умолчанию:* ветка Lanes начинается от `test` после влития 5v5. Если Throne Wars к старту K0 не влит, переносим `ThroneWarsBuilding`/сборщик в код Lanes копией и не ждём.
+1. **Зависимость от невлитых веток.** 5v5 (`feature/5v5`, PR #36 закрыт) и сборщик Throne Wars (`cod/throne-wars-map`) не в `test`, серверный Throne Wars только в рабочей копии. *По умолчанию:* ветка Lanes начинается от `feature/5v5-refresh`, куда уже влит свежий `test`. Сборщик копируем в код Lanes и не ждём.
 2. **Метка режима в `match_state`.** 5v5 и Siege сейчас оба шлют 22 поля и различаются только по `p[11]`. *По умолчанию:* Lanes ставит `p[11]="Lanes"` и версию схемы в `p[12]`. Бэкенду предлагаем пометить так же и 5v5.
 3. **Названия команд в игре.** В брифе Синие/Красные, а в CS Magic стороны — Паладины/Нежить (скины, `SideSelect`, спавны `PaladinSpawn_N`). *По умолчанию:* в UI «Паладины / Нежить», цвет полос — «свои / чужие».
 4. **Прототипная карта.** *По умолчанию:* K1 гоняем на геометрии `Map_ThroneWars`: три Линии уже есть, лишние Башни скрываем. `Map_Lanes` (120×120 из 02) собираем параллельно и переключаемся на K2.
